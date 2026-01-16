@@ -101,7 +101,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### 🔄 Updates
 
-To get the latest version, check the [GitHub repository](https://github.com/Toward77/Instagram-Remover).
+To get the latest version, check the [GitHub repository](https://github.com/Toward77/Instagram-Message-Remover).
 
 ---
 
@@ -202,7 +202,7 @@ Tento projekt je licencován pod MIT licencí - viz soubor [LICENSE](LICENSE) pr
 
 ### 🔄 Aktualizace
 
-Pro nejnovější verzi zkontrolujte [GitHub repozitář](https://github.com/Toward77/Instagram-Remover).
+Pro nejnovější verzi zkontrolujte [GitHub repozitář](https://github.com/Toward77/Instagram-Message-Remover).
 
 ---
 

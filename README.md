@@ -91,7 +91,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Language**: JavaScript (Browser Console)
 - **Target**: Instagram Web Interface
 - **Dependencies**: None (vanilla JavaScript)
-- **Instagram Language**: English
+- **Instagram Language**: English, Czech (Čeština)
 
 ### 🔄 Updates
 

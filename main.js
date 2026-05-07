@@ -66,6 +66,11 @@ function isVisible(el) {
 
 function matchesUnsendText(text) {
     let normalized = normalizeText(text);
+    return UNSEND_TEXT_VARIANTS.some((variant) => normalized === variant);
+}
+
+function matchesUnsendTextLoose(text) {
+    let normalized = normalizeText(text);
     return UNSEND_TEXT_VARIANTS.some((variant) => normalized.includes(variant));
 }
 
@@ -186,41 +191,80 @@ function findThreeDotsButton(messageElement) {
 
 // Find "Unsend" option in the context menu
 function findUnsendOption() {
-    let allElements = document.querySelectorAll('button, [role="button"], [role="menuitem"], div[tabindex="0"], div[tabindex="-1"], span');
+    // Strategy 1: Find via text nodes to get the exact element (not a container)
+    let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    while (node = walker.nextNode()) {
+        let text = normalizeText(node.textContent);
+        if (UNSEND_TEXT_VARIANTS.some(v => text === v)) {
+            // Walk up to find the closest clickable parent
+            let el = node.parentElement;
+            let clickable = null;
+            let depth = 0;
+            while (el && depth < 6) {
+                if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
+                    el.getAttribute('role') === 'menuitem' || el.getAttribute('tabindex') === '0') {
+                    // Make sure this element's DIRECT text matches (not a huge container)
+                    let elText = normalizeText(el.innerText || el.textContent || '');
+                    if (matchesUnsendText(elText)) {
+                        clickable = el;
+                        break;
+                    }
+                }
+                el = el.parentElement;
+                depth++;
+            }
+            if (clickable && isVisible(clickable)) return clickable;
+        }
+    }
 
+    // Strategy 2: Fallback - search interactive elements with exact text match
+    let allElements = document.querySelectorAll('button, [role="button"], [role="menuitem"], div[tabindex="0"], div[tabindex="-1"]');
     for (let el of allElements) {
         if (el.tagName === 'A' || el.closest('a')) continue;
         if (!isVisible(el)) continue;
-
-        let text = el.innerText || el.textContent || '';
+        let text = normalizeText(el.innerText || el.textContent || '');
         if (matchesUnsendText(text)) {
-            if (el.tagName === 'SPAN') {
-                return el.closest('button, [role="button"], [role="menuitem"], div[tabindex="0"], div[tabindex="-1"]') || el;
-            }
             return el;
         }
     }
     return null;
 }
 
-// Find confirm button inside a dialog
+// Find confirm button inside a confirmation dialog (not the context menu)
 function findConfirmButton() {
     let dialogs = document.querySelectorAll('[role="dialog"]');
     for (let dialog of dialogs) {
         let rect = dialog.getBoundingClientRect();
         if (rect.width === 0) continue;
 
-        let buttons = dialog.querySelectorAll('button, [role="button"]');
+        // The confirmation dialog contains question text like "Zrušit odeslání zprávy?"
+        // The context menu does NOT contain this question. Use this to distinguish them.
+        let dialogText = normalizeText(dialog.innerText || '');
+        let isConfirmDialog = dialogText.includes('zrušit odeslání zprávy') ||
+                              dialogText.includes('unsend message');
+        if (!isConfirmDialog) continue;
+
+        // In the confirm dialog, look for <button> elements specifically
+        let buttons = dialog.querySelectorAll('button');
         for (let btn of buttons) {
-            let text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+            let text = normalizeText(btn.innerText || btn.textContent || '');
+            if (matchesUnsendTextLoose(text)) {
+                return btn;
+            }
+        }
+
+        // Fallback: also check div[role="button"]
+        let roleButtons = dialog.querySelectorAll('[role="button"]');
+        for (let btn of roleButtons) {
+            let text = normalizeText(btn.innerText || btn.textContent || '');
             if (matchesUnsendText(text)) {
                 return btn;
             }
         }
     }
 
-    // Fallback: find any visible unsend button
-    return findUnsendOption();
+    return null;
 }
 
 // Is this my message? Check by looking for colored (sent) message bubbles

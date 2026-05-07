@@ -1,117 +1,126 @@
-// Instagram Message Deletion Script v5
-// 1. Hover message to reveal action buttons
-// 2. Click the 3-dot menu button
-// 3. Click "Unsend" / "Zrušit odeslání" (supports many languages)
-// 4. Confirm in the dialog
+// Instagram Message Unsend Script v6.0
+// Automatically unsends all your messages in the currently open conversation.
+// Supports: English, Czech
 
 let del = true;
 
-const UNSEND_TEXT_VARIANTS = [
-    'unsend',
-    'zrušit odeslání',
-    'remove for you',
-    'delete for you'
-];
+const UNSEND_LABELS = ['unsend', 'zrušit odeslání'];
+const CONFIRM_DIALOG_LABELS = ['unsend message', 'zrušit odeslání zprávy'];
 
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function realClick(el) {
-    // Strategy 1: __reactProps direct onClick (most reliable for Instagram)
+// Click an element using React internals (Instagram blocks standard .click())
+function reactClick(el) {
+    // 1. Direct __reactProps.onClick (fastest, most reliable)
     let propsKey = Object.keys(el).find(k => k.startsWith('__reactProps'));
     if (propsKey && el[propsKey].onClick) {
-        el[propsKey].onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: new MouseEvent('click'), target: el, currentTarget: el });
-        return;
+        el[propsKey].onClick({
+            preventDefault() {},
+            stopPropagation() {},
+            nativeEvent: new MouseEvent('click'),
+            target: el,
+            currentTarget: el
+        });
+        return true;
     }
 
-    // Strategy 2: Walk React fiber tree for onClick
-    let fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+    // 2. Walk the React fiber tree to find onClick
+    let fiberKey = Object.keys(el).find(k =>
+        k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+    );
     if (fiberKey) {
-        let current = el[fiberKey];
-        let depth = 0;
-        while (current && depth < 15) {
-            let props = current.memoizedProps || current.pendingProps;
+        let fiber = el[fiberKey];
+        for (let i = 0; i < 15 && fiber; i++) {
+            let props = fiber.memoizedProps || fiber.pendingProps;
             if (props && props.onClick) {
-                props.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: new MouseEvent('click'), target: el, currentTarget: el });
-                return;
+                props.onClick({
+                    preventDefault() {},
+                    stopPropagation() {},
+                    nativeEvent: new MouseEvent('click'),
+                    target: el,
+                    currentTarget: el
+                });
+                return true;
             }
-            current = current.return;
-            depth++;
+            fiber = fiber.return;
         }
     }
 
-    // Strategy 3: Fallback full event sequence
+    // 3. Fallback: dispatch full pointer/mouse event sequence
     let rect = el.getBoundingClientRect();
-    let x = rect.x + rect.width / 2;
-    let y = rect.y + rect.height / 2;
-    let opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+    let opts = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: rect.x + rect.width / 2,
+        clientY: rect.y + rect.height / 2,
+        button: 0
+    };
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new PointerEvent('pointerup', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.dispatchEvent(new MouseEvent('click', opts));
+    return false;
 }
 
-function normalizeText(text) {
-    return (text || '').trim().toLowerCase();
-}
-
-function isVisible(el) {
-    if (!el) return false;
-    let style = window.getComputedStyle(el);
+// Simulate hovering over an element to reveal action buttons
+function hoverElement(el) {
     let rect = el.getBoundingClientRect();
-    return style.display !== 'none' && style.visibility !== 'hidden' && (rect.width > 0 || rect.height > 0);
+    let cx = rect.x + rect.width * 0.8;
+    let cy = rect.y + rect.height / 2;
+    let opts = { bubbles: true, clientX: cx, clientY: cy };
+
+    el.dispatchEvent(new PointerEvent('pointerenter', opts));
+    el.dispatchEvent(new PointerEvent('pointerover', opts));
+    el.dispatchEvent(new PointerEvent('pointermove', opts));
+    el.dispatchEvent(new MouseEvent('mouseenter', opts));
+    el.dispatchEvent(new MouseEvent('mouseover', opts));
+    el.dispatchEvent(new MouseEvent('mousemove', opts));
 }
 
-function matchesUnsendText(text) {
-    let normalized = normalizeText(text);
-    return UNSEND_TEXT_VARIANTS.some((variant) => normalized === variant);
-}
+// ── DOM Finders ──
 
-function matchesUnsendTextLoose(text) {
-    let normalized = normalizeText(text);
-    return UNSEND_TEXT_VARIANTS.some((variant) => normalized.includes(variant));
-}
-
-// Find the chat scrollable container (right side panel, not the sidebar)
-function getConversationWindow() {
-    let divs = document.querySelectorAll('div');
+// Find the scrollable chat container on the right side of the screen
+function findChatContainer() {
     let best = null;
-    let bestScore = 0;
+    let bestScore = -1;
 
-    for (let div of divs) {
+    for (let div of document.querySelectorAll('div')) {
         let style = window.getComputedStyle(div);
         let rect = div.getBoundingClientRect();
 
-        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
-            div.scrollHeight > div.clientHeight + 50 &&
-            rect.height > 200 && rect.width > 200) {
+        let isScrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll');
+        let hasContent = div.scrollHeight > div.clientHeight + 50;
+        let isLargeEnough = rect.height > 200 && rect.width > 200;
 
-            // Must be on the right side (not the conversation list sidebar)
-            let score = 0;
-            if (rect.x > 300) score += 10;
-            if (rect.width > 400) score += 5;
-            if (rect.height > 500) score += 5;
-            // Prefer containers with more content
-            score += Math.min(div.scrollHeight / 500, 10);
+        if (!isScrollable || !hasContent || !isLargeEnough) continue;
 
-            if (score > bestScore) {
-                bestScore = score;
-                best = div;
-            }
+        // Score by position and size — prefer the right-side panel
+        let score = 0;
+        if (rect.x > 200) score += 10;
+        if (rect.x > 400) score += 5;
+        if (rect.width > 400) score += 5;
+        if (rect.height > 500) score += 5;
+        score += Math.min(div.scrollHeight / 500, 10);
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = div;
         }
     }
     return best;
 }
 
-// Get the inner message list container (drill past single-child wrappers)
-function getMessageList(chatWindow) {
-    let inner = chatWindow;
-    let depth = 0;
-    while (inner.children.length <= 2 && depth < 10) {
+// Drill into single-child wrapper divs to reach the actual message list
+function findMessageList(container) {
+    let el = container;
+    for (let i = 0; i < 10; i++) {
+        if (el.children.length > 2) break;
         let bestChild = null;
-        for (let child of inner.children) {
+        for (let child of el.children) {
             if (child.tagName === 'DIV') {
                 if (!bestChild || child.children.length > bestChild.children.length) {
                     bestChild = child;
@@ -119,191 +128,44 @@ function getMessageList(chatWindow) {
             }
         }
         if (!bestChild) break;
-        inner = bestChild;
-        depth++;
+        el = bestChild;
     }
-    return inner;
+    return el;
 }
 
-// Get all message elements from the chat
-function getMessages(chatWindow) {
-    let messageList = getMessageList(chatWindow);
-    return Array.from(messageList.children).filter(child => {
-        let rect = child.getBoundingClientRect();
-        return child.tagName === 'DIV' && rect.height > 15;
+// Get visible message elements from the message list
+function getMessages(container) {
+    let list = findMessageList(container);
+    return Array.from(list.children).filter(child => {
+        return child.tagName === 'DIV' && child.getBoundingClientRect().height > 20;
     });
 }
 
-// Click and wait until the expected result appears
-async function clickAndWaitForMenu(button, checkFn, maxAttempts = 3) {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        console.log(`    Attempt ${attempt + 1}/${maxAttempts}...`);
+// Check if a message was sent by the current user (blue bubble on the right)
+function isSentByMe(messageEl) {
+    for (let div of messageEl.querySelectorAll('div')) {
+        let bg = window.getComputedStyle(div).backgroundColor;
+        if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') continue;
 
-        button.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-        await delay(100);
+        let rect = div.getBoundingClientRect();
+        if (rect.width < 30 || rect.height < 15) continue;
 
-        realClick(button);
-        await delay(800);
+        let match = bg.match(/\d+/g);
+        if (!match) continue;
+        let [r, g, b] = match.map(Number);
 
-        if (checkFn()) {
-            console.log(`    ✓ Menu opened`);
+        // Instagram sent messages use a blue/purple background
+        if (b > 150 && r < 150 && rect.x + rect.width > window.innerWidth * 0.55) {
             return true;
         }
-
-        console.log(`    ✗ Menu did not open, retrying...`);
-        await delay(300);
     }
 
-    console.log(`    ✗ Failed after ${maxAttempts} attempts`);
-    return false;
-}
-
-// Find the 3-dot button (SVG with 3 circles or aria-label match)
-function findThreeDotsButton(messageElement) {
-    // Strategy 1: SVG with exactly 3 circles (the ⋮ icon)
-    let allSvgs = messageElement.querySelectorAll('svg');
-    for (let svg of allSvgs) {
-        let circles = svg.querySelectorAll('circle');
-        if (circles.length === 3) {
-            let clickable = svg.closest('[role="button"]') ||
-                            svg.closest('div[tabindex], button') ||
-                            svg.parentElement;
-
-            if (clickable && !clickable.closest('a') && clickable.tagName !== 'A') {
-                return clickable;
-            }
-        }
-    }
-
-    // Strategy 2: aria-label containing "more options" / "další možnosti" etc.
-    let allBtns = messageElement.querySelectorAll('[role="button"], button');
-    for (let btn of allBtns) {
-        let label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        if (label.includes('more') || label.includes('další') || label.includes('option') || label.includes('možnost') || label.includes('más') || label.includes('plus') || label.includes('mehr')) {
-            if (!btn.closest('a') && btn.tagName !== 'A') {
-                return btn;
-            }
-        }
-    }
-
-    return null;
-}
-
-// Find "Unsend" option in the context menu
-function findUnsendOption() {
-    // Strategy 1: Find via text nodes to get the exact element (not a container)
-    let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-    let node;
-    while (node = walker.nextNode()) {
-        let text = normalizeText(node.textContent);
-        if (UNSEND_TEXT_VARIANTS.some(v => text === v)) {
-            // Walk up to find the closest clickable parent
-            let el = node.parentElement;
-            let clickable = null;
-            let depth = 0;
-            while (el && depth < 6) {
-                if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
-                    el.getAttribute('role') === 'menuitem' || el.getAttribute('tabindex') === '0') {
-                    // Make sure this element's DIRECT text matches (not a huge container)
-                    let elText = normalizeText(el.innerText || el.textContent || '');
-                    if (matchesUnsendText(elText)) {
-                        clickable = el;
-                        break;
-                    }
-                }
-                el = el.parentElement;
-                depth++;
-            }
-            if (clickable && isVisible(clickable)) return clickable;
-        }
-    }
-
-    // Strategy 2: Fallback - search interactive elements with exact text match
-    let allElements = document.querySelectorAll('button, [role="button"], [role="menuitem"], div[tabindex="0"], div[tabindex="-1"]');
-    for (let el of allElements) {
-        if (el.tagName === 'A' || el.closest('a')) continue;
-        if (!isVisible(el)) continue;
-        let text = normalizeText(el.innerText || el.textContent || '');
-        if (matchesUnsendText(text)) {
-            return el;
-        }
-    }
-    return null;
-}
-
-// Find confirm button inside a confirmation dialog (not the context menu)
-function findConfirmButton() {
-    let dialogs = document.querySelectorAll('[role="dialog"]');
-    for (let dialog of dialogs) {
-        let rect = dialog.getBoundingClientRect();
-        if (rect.width === 0) continue;
-
-        // The confirmation dialog contains question text like "Zrušit odeslání zprávy?"
-        // The context menu does NOT contain this question. Use this to distinguish them.
-        let dialogText = normalizeText(dialog.innerText || '');
-        let isConfirmDialog = dialogText.includes('zrušit odeslání zprávy') ||
-                              dialogText.includes('unsend message');
-        if (!isConfirmDialog) continue;
-
-        // In the confirm dialog, look for <button> elements specifically
-        let buttons = dialog.querySelectorAll('button');
-        for (let btn of buttons) {
-            let text = normalizeText(btn.innerText || btn.textContent || '');
-            if (matchesUnsendTextLoose(text)) {
-                return btn;
-            }
-        }
-
-        // Fallback: also check div[role="button"]
-        let roleButtons = dialog.querySelectorAll('[role="button"]');
-        for (let btn of roleButtons) {
-            let text = normalizeText(btn.innerText || btn.textContent || '');
-            if (matchesUnsendText(text)) {
-                return btn;
-            }
-        }
-    }
-
-    return null;
-}
-
-// Is this my message? Check by looking for colored (sent) message bubbles
-function isMyMessage(messageElement) {
-    // Strategy 1: Check for sent message bubble colors (Instagram uses a blue/purple for sent)
-    let allDivs = messageElement.querySelectorAll('div');
-    for (let div of allDivs) {
-        let style = window.getComputedStyle(div);
-        let bg = style.backgroundColor;
-        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
-            let rect = div.getBoundingClientRect();
-            if (rect.width > 30 && rect.height > 15) {
-                // Parse RGB values
-                let match = bg.match(/\d+/g);
-                if (match) {
-                    let [r, g, b] = match.map(Number);
-                    // Sent messages typically have a blue/purple background (r < 150, b > 150)
-                    // Received messages are usually grey (r ≈ g ≈ b, all similar values)
-                    let isBlue = b > 150 && r < 150;
-                    let isGrey = Math.abs(r - g) < 30 && Math.abs(g - b) < 30 && r > 30 && r < 100;
-
-                    if (isBlue && rect.x + rect.width > window.innerWidth * 0.6) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // Strategy 2: Fallback to position-based check (right-aligned = sent)
-    let row = messageElement;
-    let rect = row.getBoundingClientRect();
-    // Check if the message content is on the right side
-    let innerDivs = messageElement.querySelectorAll('div');
-    for (let div of innerDivs) {
-        let dr = div.getBoundingClientRect();
-        if (dr.width > 30 && dr.height > 15 && dr.width < rect.width * 0.9) {
-            // This is likely a message bubble, check its position
-            if (dr.x + dr.width > rect.x + rect.width * 0.7) {
+    // Fallback: position-based check (right-aligned content)
+    let containerRect = messageEl.getBoundingClientRect();
+    for (let div of messageEl.querySelectorAll('div')) {
+        let rect = div.getBoundingClientRect();
+        if (rect.width > 30 && rect.height > 15 && rect.width < containerRect.width * 0.9) {
+            if (rect.x + rect.width > containerRect.x + containerRect.width * 0.7) {
                 return true;
             }
         }
@@ -312,318 +174,299 @@ function isMyMessage(messageElement) {
     return false;
 }
 
-async function deleteMessages(messages) {
-    console.log(`\n━━━ Processing ${messages.length} messages ━━━`);
-    let deleted = 0;
-    let skipped = 0;
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (!del) {
-            console.log("🛑 Stopped");
-            break;
+// Find the 3-dot (⋮) menu button near a message
+function findDotsButton(messageEl) {
+    // Search the message element and its nearby parents/siblings
+    let searchAreas = [messageEl];
+    if (messageEl.parentElement) {
+        searchAreas.push(messageEl.parentElement);
+        // Also check sibling elements (the button may render as a sibling)
+        for (let sib of messageEl.parentElement.children) {
+            if (sib !== messageEl) searchAreas.push(sib);
         }
+    }
 
-        console.log(`\n[${messages.length - i}/${messages.length}]`);
-        let msg = messages[i];
+    for (let area of searchAreas) {
+        for (let svg of area.querySelectorAll('svg')) {
+            if (svg.querySelectorAll('circle').length === 3) {
+                let clickable = svg.closest('[role="button"]') ||
+                                svg.closest('div[tabindex]') ||
+                                svg.closest('button') ||
+                                svg.parentElement;
 
-        let rect = msg.getBoundingClientRect();
-        if (rect.height < 15) {
-            skipped++;
-            continue;
+                if (clickable && clickable.tagName !== 'A' && !clickable.closest('a')) {
+                    return clickable;
+                }
+            }
         }
+    }
+    return null;
+}
 
-        if (!isMyMessage(msg)) {
-            console.log("  ⏭ Not my message");
-            continue;
+// Find "Unsend" option in the context menu using exact text node matching
+function findUnsendMenuItem() {
+    let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node;
+    while (node = walker.nextNode()) {
+        let text = (node.textContent || '').trim().toLowerCase();
+        if (!UNSEND_LABELS.includes(text)) continue;
+
+        // Walk up to find the closest clickable interactive element
+        let el = node.parentElement;
+        for (let i = 0; i < 8 && el; i++) {
+            let isClickable = el.tagName === 'BUTTON' ||
+                              el.getAttribute('role') === 'button' ||
+                              el.getAttribute('role') === 'menuitem' ||
+                              el.getAttribute('tabindex') === '0';
+
+            if (isClickable) {
+                let elText = (el.innerText || '').trim().toLowerCase();
+                if (UNSEND_LABELS.includes(elText)) {
+                    let rect = el.getBoundingClientRect();
+                    if (rect.width > 0) return el;
+                }
+            }
+            el = el.parentElement;
         }
+    }
+    return null;
+}
 
-        // Scroll into view if needed
-        if (rect.top < 100 || rect.bottom > window.innerHeight - 100) {
-            msg.scrollIntoView({ block: 'center', behavior: 'smooth' });
-            await delay(400);
-        }
+// Find the confirm button inside the confirmation dialog
+// (distinguished from context menu by the question text)
+function findConfirmButton() {
+    for (let dialog of document.querySelectorAll('[role="dialog"]')) {
+        let rect = dialog.getBoundingClientRect();
+        if (rect.width === 0) continue;
 
-        // Hover over the message to reveal action buttons
-        let msgRect = msg.getBoundingClientRect();
-        let cx = msgRect.x + msgRect.width * 0.8;
-        let cy = msgRect.y + msgRect.height / 2;
+        let dialogText = (dialog.innerText || '').toLowerCase();
+        let isConfirmation = CONFIRM_DIALOG_LABELS.some(label => dialogText.includes(label));
+        if (!isConfirmation) continue;
 
-        msg.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, clientX: cx, clientY: cy }));
-        msg.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, clientX: cx, clientY: cy }));
-        msg.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: cx, clientY: cy }));
-        msg.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: cx, clientY: cy }));
-        msg.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: cx, clientY: cy }));
-        msg.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx, clientY: cy }));
-        await delay(500);
-
-        // Find the 3-dot button
-        let btn = findThreeDotsButton(msg);
-        if (!btn) {
-            let parent = msg.parentElement;
-            for (let j = 0; j < 3; j++) {
-                if (!parent) break;
-                btn = findThreeDotsButton(parent);
-                if (btn) break;
-                parent = parent.parentElement;
+        // Look for <button> with matching text
+        for (let btn of dialog.querySelectorAll('button')) {
+            let text = (btn.innerText || '').trim().toLowerCase();
+            if (UNSEND_LABELS.some(label => text.includes(label))) {
+                return btn;
             }
         }
 
-        if (!btn) {
-            console.log("  ✗ 3-dot button not found");
-            skipped++;
-            continue;
+        // Fallback: div[role="button"]
+        for (let btn of dialog.querySelectorAll('[role="button"]')) {
+            let text = (btn.innerText || '').trim().toLowerCase();
+            if (UNSEND_LABELS.includes(text)) {
+                return btn;
+            }
         }
-
-        console.log("  🖱 Clicking 3-dot button...");
-        let menuOpened = await clickAndWaitForMenu(btn, () => {
-            return findUnsendOption() !== null;
-        });
-
-        if (!menuOpened) {
-            console.log("  ✗ Menu did not open");
-            document.body.click();
-            await delay(300);
-            skipped++;
-            continue;
-        }
-
-        // Step 1: Click "Unsend"
-        let deleteBtn = findUnsendOption();
-        if (!deleteBtn) {
-            console.log("  ✗ 'Unsend' option not found in menu");
-            document.body.click();
-            await delay(300);
-            skipped++;
-            continue;
-        }
-
-        console.log("  🖱 Clicking 'Unsend'...");
-        realClick(deleteBtn);
-        await delay(500);
-
-        // Step 2: Confirm in dialog (retry until dialog appears)
-        let confirmBtn = null;
-        for (let attempt = 0; attempt < 6; attempt++) {
-            confirmBtn = findConfirmButton();
-            if (confirmBtn) break;
-            await delay(500);
-        }
-
-        if (confirmBtn) {
-            console.log("  ✓ Confirming unsend...");
-            realClick(confirmBtn);
-            await delay(500);
-        } else {
-            console.log("  ⚠ Confirmation button not found (message may still be deleted)");
-        }
-
-        console.log("  ✅ Deleted");
-        deleted++;
-        await delay(400);
     }
-
-    console.log(`\n━━━ Summary ━━━`);
-    console.log(`✅ Deleted: ${deleted}`);
-    console.log(`⏭ Skipped: ${skipped}`);
+    return null;
 }
 
-async function loadChat() {
-    console.log("Loading chat history...");
-    let chatWindow = getConversationWindow();
+// Close any open menu/dialog
+function dismissMenu() {
+    document.body.click();
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
+    }));
+}
 
-    if (!chatWindow) {
-        console.error("❌ Conversation window not found. Make sure you have a chat open.");
-        return;
-    }
+// ── Core Logic ──
 
-    let lastScrollTop = chatWindow.scrollTop;
-    let samePositionTime = 0;
-    let iterations = 0;
-
-    while (del && iterations < 1000) {
-        chatWindow.scrollTo(0, 0);
+async function unsendMessage(messageEl) {
+    // Scroll the message into view
+    let rect = messageEl.getBoundingClientRect();
+    if (rect.top < 80 || rect.bottom > window.innerHeight - 80) {
+        messageEl.scrollIntoView({ block: 'center', behavior: 'auto' });
         await delay(300);
-        iterations++;
-
-        if (chatWindow.scrollTop === lastScrollTop) {
-            samePositionTime += 300;
-        } else {
-            samePositionTime = 0;
-            console.log(`Loading... (${chatWindow.scrollTop})`);
-        }
-
-        if (samePositionTime >= 3000) {
-            console.log("✓ Reached the top");
-            break;
-        }
-
-        lastScrollTop = chatWindow.scrollTop;
     }
 
-    chatWindow.scrollTo(0, chatWindow.scrollHeight);
-    await delay(200);
-    console.log("Starting deletion...");
-    await deleteChat();
-}
-
-async function deleteChat() {
-    let iterations = 0;
-
-    try {
-        while (del && iterations < 500) {
-            let chatWindow = getConversationWindow();
-            if (!chatWindow) {
-                console.error("❌ Conversation window lost");
-                break;
-            }
-
-            let messages = getMessages(chatWindow);
-            if (messages.length === 0) {
-                console.log("✓ No more messages");
-                break;
-            }
-
-            console.log(`\nCycle ${iterations + 1}: ${messages.length} messages`);
-            await deleteMessages(messages);
-
-            if (chatWindow.scrollTop <= 1) {
-                console.log("✓ Reached the top");
-                break;
-            }
-
-            iterations++;
-            await delay(300);
-        }
-        console.log("\n🎉 DONE");
-    } catch (error) {
-        console.error("❌ Error:", error);
-    }
-}
-
-function stopDelete() {
-    del = false;
-    console.log("🛑 Deletion stopped");
-}
-
-async function testDeleteOne() {
-    console.log("\n━━━ Single-message delete test ━━━");
-    let chatWindow = getConversationWindow();
-    if (!chatWindow) {
-        console.log("❌ Conversation window not found");
-        return;
-    }
-
-    let messages = getMessages(chatWindow);
-    if (messages.length === 0) {
-        console.log("❌ No messages found");
-        return;
-    }
-
-    let oldDel = del;
-    del = true;
-    await deleteMessages([messages[messages.length - 1]]);
-    del = oldDel;
-    console.log("\n━━━ Test complete ━━━");
-}
-
-async function debugMessage() {
-    console.log("\n━━━━━━━ MESSAGE DEBUG ━━━━━━━");
-    let chatWindow = getConversationWindow();
-    if (!chatWindow) {
-        console.log("❌ Conversation window not found");
-        return;
-    }
-
-    let messages = getMessages(chatWindow);
-    console.log(`Found ${messages.length} message elements`);
-
-    if (messages.length === 0) {
-        console.log("❌ No messages");
-        return;
-    }
-
-    let msg = messages[messages.length - 1];
-    let text = (msg.innerText || '').substring(0, 80);
-    console.log(`Last message: "${text}"`);
-    console.log(`  Is my message: ${isMyMessage(msg)}`);
-
-    // Hover
-    let rect = msg.getBoundingClientRect();
-    let cx = rect.x + rect.width * 0.8;
-    let cy = rect.y + rect.height / 2;
-
-    msg.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, clientX: cx, clientY: cy }));
-    msg.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, clientX: cx, clientY: cy }));
-    msg.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: cx, clientY: cy }));
-    msg.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: cx, clientY: cy }));
-    msg.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: cx, clientY: cy }));
-    msg.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx, clientY: cy }));
+    // Step 1: Hover to reveal action buttons
+    hoverElement(messageEl);
     await delay(600);
 
-    console.log("\n📋 Buttons in the message:");
-    let buttons = msg.querySelectorAll('[role="button"]');
-    buttons.forEach((btn, i) => {
-        let label = btn.getAttribute('aria-label') || '(no label)';
-        let svg = btn.querySelector('svg');
-        let circles = svg ? svg.querySelectorAll('circle').length : 0;
-        console.log(`  ${i + 1}. "${label}" - SVG circles: ${circles}`);
-    });
-
-    console.log("\n🔍 Looking for 3-dot button...");
-    let threeDotsBtn = findThreeDotsButton(msg);
-    if (threeDotsBtn) {
-        console.log("✅ Found 3-dot button:", threeDotsBtn);
-        console.log("   aria-label:", threeDotsBtn.getAttribute('aria-label'));
-
-        console.log("\n🖱 Clicking 3-dot button...");
-        threeDotsBtn.click();
-        await delay(700);
-
-        console.log("\n📋 Looking for 'Unsend' option:");
-        let unsendBtn = findUnsendOption();
-        if (unsendBtn) {
-            console.log("✅ Found:", unsendBtn);
-            console.log("   Text:", (unsendBtn.innerText || unsendBtn.textContent || '').trim());
-        } else {
-            console.log("❌ 'Unsend' not found");
-            console.log("   Visible menu items:");
-            let menuItems = document.querySelectorAll('[role="menuitem"], [role="button"], div[tabindex="0"]');
-            menuItems.forEach(el => {
-                if (!isVisible(el)) return;
-                let t = (el.innerText || '').trim();
-                if (t.length > 0 && t.length < 80) {
-                    console.log(`     - "${t}"`);
-                }
-            });
-        }
-
-        // Close menu
-        document.body.click();
-    } else {
-        console.log("❌ 3-dot button not found");
-        console.log("\n🔍 Looking in parent elements...");
-        let parent = msg.parentElement;
-        for (let j = 0; j < 3; j++) {
-            if (!parent) break;
-            let btn = findThreeDotsButton(parent);
-            if (btn) {
-                console.log(`  ✅ Found in parent ${j + 1}`);
-                break;
-            }
-            parent = parent.parentElement;
-        }
+    // Step 2: Find and click the 3-dot button
+    let dotsBtn = findDotsButton(messageEl);
+    if (!dotsBtn) {
+        // Retry hover with a longer wait
+        hoverElement(messageEl);
+        await delay(1000);
+        dotsBtn = findDotsButton(messageEl);
+    }
+    if (!dotsBtn) {
+        console.log('    ✗ 3-dot button not found');
+        return false;
     }
 
-    console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    reactClick(dotsBtn);
+    await delay(700);
+
+    // Step 3: Find and click "Unsend" in the context menu
+    let unsendBtn = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        unsendBtn = findUnsendMenuItem();
+        if (unsendBtn) break;
+        await delay(400);
+    }
+    if (!unsendBtn) {
+        console.log('    ✗ "Unsend" not found in menu');
+        dismissMenu();
+        await delay(300);
+        return false;
+    }
+
+    reactClick(unsendBtn);
+    await delay(800);
+
+    // Step 4: Find and click confirm button in the dialog
+    let confirmBtn = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
+        confirmBtn = findConfirmButton();
+        if (confirmBtn) break;
+        await delay(400);
+    }
+    if (!confirmBtn) {
+        console.log('    ⚠ Confirm dialog not found');
+        dismissMenu();
+        await delay(300);
+        return false;
+    }
+
+    reactClick(confirmBtn);
+    await delay(600);
+    return true;
 }
 
-console.log("═══════════════════════════════════════════════════");
-console.log("Instagram Script v5.0");
-console.log("═══════════════════════════════════════════════════");
-console.log("Supports: 🇬🇧 English, 🇨🇿 Čeština");
-console.log("");
-console.log("🚀 Auto-starting in 2 seconds...");
-console.log("   Type stopDelete() to stop at any time");
-console.log("═══════════════════════════════════════════════════");
+async function processMessages() {
+    let totalDeleted = 0;
+    let totalSkipped = 0;
+    let cycles = 0;
 
-setTimeout(() => loadChat(), 2000);
+    while (del && cycles < 500) {
+        let container = findChatContainer();
+        if (!container) {
+            console.log('❌ Chat container not found');
+            break;
+        }
+
+        let messages = getMessages(container);
+        if (messages.length === 0) {
+            console.log('✅ No more messages');
+            break;
+        }
+
+        console.log(`\n── Cycle ${cycles + 1}: ${messages.length} messages ──`);
+
+        let deletedThisCycle = 0;
+
+        // Process from bottom to top
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (!del) {
+                console.log('🛑 Stopped by user');
+                return { deleted: totalDeleted, skipped: totalSkipped };
+            }
+
+            let msg = messages[i];
+            let msgRect = msg.getBoundingClientRect();
+            if (msgRect.height < 20) continue;
+
+            if (!isSentByMe(msg)) {
+                continue;
+            }
+
+            let preview = (msg.innerText || '').trim().substring(0, 30).replace(/\n/g, ' ');
+            console.log(`  [${messages.length - i}] "${preview}..."`);
+
+            let success = await unsendMessage(msg);
+            if (success) {
+                totalDeleted++;
+                deletedThisCycle++;
+                console.log('    ✅ Unsent');
+            } else {
+                totalSkipped++;
+            }
+
+            await delay(300);
+        }
+
+        if (deletedThisCycle === 0) {
+            // Scroll up to load more messages
+            container.scrollTo(0, Math.max(0, container.scrollTop - container.clientHeight));
+            await delay(800);
+
+            let newMessages = getMessages(container);
+            if (newMessages.length === messages.length) {
+                console.log('✅ No more messages to process');
+                break;
+            }
+        }
+
+        cycles++;
+    }
+
+    return { deleted: totalDeleted, skipped: totalSkipped };
+}
+
+async function scrollToTop() {
+    console.log('⏫ Loading chat history...');
+    let container = findChatContainer();
+    if (!container) {
+        console.error('❌ Chat container not found. Make sure a conversation is open.');
+        return false;
+    }
+
+    let lastScrollTop = container.scrollTop;
+    let staleTime = 0;
+
+    for (let i = 0; i < 1000 && del; i++) {
+        container.scrollTo(0, 0);
+        await delay(300);
+
+        if (container.scrollTop === lastScrollTop) {
+            staleTime += 300;
+        } else {
+            staleTime = 0;
+        }
+
+        if (staleTime >= 3000) break;
+        lastScrollTop = container.scrollTop;
+    }
+
+    console.log('✅ Reached the top');
+    container.scrollTo(0, container.scrollHeight);
+    await delay(300);
+    return true;
+}
+
+// ── Public API ──
+
+async function start() {
+    del = true;
+    console.log('🚀 Starting...');
+
+    let loaded = await scrollToTop();
+    if (!loaded) return;
+
+    let result = await processMessages();
+    console.log(`\n${'═'.repeat(40)}`);
+    console.log(`✅ Deleted: ${result.deleted}`);
+    console.log(`⏭  Skipped: ${result.skipped}`);
+    console.log(`${'═'.repeat(40)}`);
+}
+
+function stop() {
+    del = false;
+    console.log('🛑 Stopping...');
+}
+
+// ── Auto-start ──
+
+console.log('═'.repeat(50));
+console.log('Instagram Unsend Script v6.0');
+console.log('═'.repeat(50));
+console.log('🇬🇧 English  🇨🇿 Čeština');
+console.log('');
+console.log('🚀 Auto-starting in 2 seconds...');
+console.log('   Type stop() to cancel at any time');
+console.log('═'.repeat(50));
+
+setTimeout(() => start(), 2000);
